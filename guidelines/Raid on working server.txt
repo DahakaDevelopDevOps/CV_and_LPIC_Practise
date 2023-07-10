@@ -1,0 +1,55 @@
+1. blkid to see tree of existing disks
+2. The first thing we did was to edit /etc/default/grub:
+GRUB_TIMEOUT=5 (make the timeout shorter);
+GRUB_RECORDFAIL_TIMEOUT=10 (we add it so the system can boot also in case of an error without any interactive intervention; timeout is optional);
+GRUB_CMDLINE_LINUX_DEFAULT="bootdegraded" (be sure to add "bootdegraded", so that the system can boot from an incomplete array);
+#GRUB_HIDDEN_TIMEOUT_QUIET=true (this must be commented out so that the GRUB menu is always displayed).
+3. sfdisk –d /dev/sda | sfdisk –f /dev/sdb - Temporarily disable swap, partition /dev/sda1 using fdisk set type fd (Linux raid autodetect), then make the partitioning of the second disk the same as the first (all operations are performed with superuser privileges):
+4. mdadm --create --verbose /dev/md0 --raid-devices=2 --level=1 --metadata=1.2 /dev/sda1 /dev/sdb1 -creating raid
+5. mkswap /dev/md0 -creating swap direction
+6. /etc/fstab - /dev/sda1 → 
+/dev/md0 # SWAP
+/dev/sda2 → /dev/md1 # /
+/dev/sda3 → /dev/md2 # /home | replacing the partitions of the first disk with RAID partitions and changing the numbers in the sixth column (the need for fsck checking) to zeros:
+7. swapon -a - activate swap - activate swap
+8. Since our server is currently running on the first disk, we will create a RAID using only the second disk so far
+mdadm --create --verbose /dev/md1 --raid-devices=2 --level=1 --metadata=1.2 missing /dev/sdb2 
+mkfs.ext4 /dev/md1
+mdadm --create --verbose /dev/md2 --raid-devices=2 --level=1 --metadata=1.2 missing /dev/sdb3 
+mkfs.ext4 /dev/md2
+9. Update the mdadm.conf configuration:
+mdadm --examine --scan >> /etc/mdadm/mdadm.conf
+10. Update initramfs to keep our RAID information:
+update-initramfs -u
+11. Then begins the most time-consuming process - data synchronization. Since our server performs some tasks, it may turn out that after the synchronization is complete, some of the information on the array partitions will be different from the data on the corresponding partitions of the working disk. There are several options here: you can choose the time of least load, you can stop some services during synchronization, or you can ignore the differences. In general, mount and synchronize:
+mount /dev/md1 /mnt/ && [tmux|screen] rsync -axu / /mnt
+mount /dev/md2 /mnt/home && [tmux|screen] rsync -axu /home/ /mnt/home
+12. To ensure that synchronization is not interrupted by an unexpected ssh connection, it does not hurt to use the terminal multiplexer.
+After waiting for synchronization to finish, mount the system directories to the new root:
+mount --bind /proc /mnt/proc
+mount --bind /dev /mnt/dev
+mount --bind /var /mnt/var
+mount --bind /run /mnt/run
+mount --bind /sys /mnt/sys
+13. Transfering to a new system
+chroot /mnt
+14. Setting installers on two disks 
+grub-install -–recheck /dev/sda
+grub-install --recheck /dev/sdb 
+15. Update the boot configuration to load the modules needed for RAID (mdraid1x):
+update-grub
+16. Returning to the main system and repeating synchronisation if it is necessary
+[tmux|screen] rsync -axu / /mnt
+[tmux|screen] rsync -axu /home/ /mnt/home
+17. Since we have no physical access to either the console or the server and we can not select a disk from which to boot from RAID, we use this trick: to the disk, from which the system starts and which is not in RAID, we transfer the prepared configuration of the bootloader, "aware" of RAID. Copy grub.cfg from the disk in RAID to our current boot drive. This will allow the system to boot from /dev/sda but still mount arrays and continue to boot from the partition which is already in RAID. First save the old file, which you might need in case the system cannot boot from RAID, and then copy the "battle" configuration file:
+cp -p /boot/grub/grub.cfg /boot/grub/grub.old 
+cp -p /mnt/boot/grub/grub.cfg /boot/grub/grub.cfg
+18. Additionally, you can compare these files and make sure that in the new bootloader configuration file the root partition is specified as being on RAID.
+
+Now we move to the most important stage of the work done and reboot. You can ping the server in the console to see when the server will be available again. Log in and see that we got everything the way we wanted: lsblk shows that the / and /home directories are on RAID partitions.
+
+As an appetizer, we have an easy and pleasant job left - to add two partitions of the first disk to the array, having set them to fd type using fdisk:
+mdadm /dev/md1 --add /dev/sda2
+mdadm /dev/md2 --add /dev/sda3 
+19. After that preodically watch how process is going: watch -n 5 cat /proc/mdstat.
+
